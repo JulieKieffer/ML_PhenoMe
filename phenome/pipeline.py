@@ -898,7 +898,7 @@ class PhenoMe(
             cur_params["pad_size"],
             n_channels=_n_channels_for_transforms(cur_params),
         )
-        self.image_transforms = cur_t
+        self.image_transforms = cur_t #this is the part where the images are resized
 
         dl = self._create_dataloader(
             filtered_data,

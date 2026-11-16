@@ -71,19 +71,22 @@ class PhenoMeDataset(Dataset):
             img = read_image(file_path)
             img = ensure_hwc(img)
 
+            prepared_imgs = self._prepare_image_channels(img)
+
+            processed_imgs = prepared_imgs
+
+            # Apply transform if provided
+            if self.transform is not None:
+                if self.channel_mode == "split":
+                    # Split mode: prepared_imgs is a list
+                    processed_imgs = [self.transform(p) for p in prepared_imgs]
+                else:
+                    # Combined mode: prepared_imgs is a single array
+                    processed_imgs = self.transform(prepared_imgs)
+
             # Apply custom preprocessing if provided
             if self.preprocessing_fn is not None:
-                img = self.preprocessing_fn(img)
-
-            processed_imgs = self._prepare_image_channels(img)
-
-            if self.transform:
-                if self.channel_mode == "split":
-                    # Split mode: processed_imgs is a list
-                    return [self.transform(p) for p in processed_imgs], item
-                else:
-                    # Combined mode: processed_imgs is a single array
-                    return self.transform(processed_imgs), item
+                processed_imgs = self.preprocessing_fn(processed_imgs)
 
             return processed_imgs, item
 
