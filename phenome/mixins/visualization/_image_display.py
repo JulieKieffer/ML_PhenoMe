@@ -236,11 +236,18 @@ class _ImageDisplayMixin:
         img = read_image(img_path)
         img = ensure_hwc(img)
 
-        preprocessing_fn = getattr(self, "preprocessing_fn", None)
-        if preprocessing_fn is not None:
-            img = preprocessing_fn(img)
-
         image_transforms = getattr(self, "image_transforms", None)
+        if use_custom_channels and channels is not None:
+            selected = sorted([channels] if isinstance(channels, int) else list(channels))
+            max_chan = img.shape[-1] if img.ndim >= 3 else 1
+            valid_selected = [c for c in selected if c < max_chan]
+            if len(valid_selected) != len(selected):
+                logger.warning(
+                    f"Some channels in {selected} are out of bounds for image "
+                    f"(max {max_chan}). Using valid channels only."
+                )
+            img = img[..., valid_selected] if valid_selected else img
+
         if apply_transforms and image_transforms is not None:
             from torchvision import transforms
 
@@ -248,15 +255,6 @@ class _ImageDisplayMixin:
             for t in image_transforms.transforms:
                 if not isinstance(t, transforms.Normalize):
                     t_list.append(t)
-            if use_custom_channels and channels is not None:
-                selected = sorted([channels] if isinstance(channels, int) else list(channels))
-                max_chan = img.shape[-1] if img.ndim >= 3 else 1
-                valid_selected = [c for c in selected if c < max_chan]
-                if len(valid_selected) != len(selected):
-                    logger.warning(
-                        f"Some channels in {selected} are out of bounds for image (max {max_chan}). Using valid channels only."
-                    )
-                img = img[..., valid_selected] if valid_selected else img
             img = np.ascontiguousarray(img)
             temp_transform = transforms.Compose(t_list)
             img_tensor = temp_transform(img)
@@ -269,15 +267,10 @@ class _ImageDisplayMixin:
         else:
             if image_transforms is None and apply_transforms:
                 logger.warning("image_transforms not found, showing raw image.")
-            if use_custom_channels and channels is not None:
-                selected = sorted([channels] if isinstance(channels, int) else list(channels))
-                max_chan = img.shape[-1] if img.ndim >= 3 else 1
-                valid_selected = [c for c in selected if c < max_chan]
-                if len(valid_selected) != len(selected):
-                    logger.warning(
-                        f"Some channels in {selected} are out of bounds for image (max {max_chan}). Using valid channels only."
-                    )
-                img = img[..., valid_selected] if valid_selected else img
+
+        preprocessing_fn = getattr(self, "preprocessing_fn", None)
+        if preprocessing_fn is not None:
+            img = preprocessing_fn(img)
 
         was_downsampled = False
         if downsample is not None and downsample > 0:
