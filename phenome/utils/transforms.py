@@ -410,13 +410,14 @@ class TransformBuilder:
 
         pad_hw = _canonical_spatial_size(pad_size)
         resize_hw = _canonical_spatial_size(resize_size)
-        t = [transforms.ToTensor(), TypeMaxNorm()]
+        t = [transforms.ToTensor()]
         if pad_hw is not None:
             t.append(PadToSize(pad_size=pad_hw))
         if resize_hw is not None:
             parsed = _parse_spatial_size(resize_hw)
             assert parsed is not None
             t.append(transforms.Resize(parsed, antialias=True))
+        t.append(TypeMaxNorm())
         t.append(transforms.Normalize(mean=mean, std=std))
         return transforms.Compose(t)
 

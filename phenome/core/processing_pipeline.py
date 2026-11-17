@@ -1562,24 +1562,7 @@ def _build_steps(
             },
         }
     )
-    if preprocessing_fn is not None:
-        name = callable_display_name(preprocessing_fn)
-        detail = f"`{name}` (internals unknown)"
-        if preprocessing_description:
-            detail = f"{detail}; {preprocessing_description}"
-        steps.append(
-            {
-                "id": "custom_preprocess",
-                "title": "Your preprocessing",
-                "detail": detail,
-                "technical": {
-                    "name": name,
-                    "description": preprocessing_description,
-                    "internals": "unknown",
-                },
-            }
-        )
-
+    
     channel_mode = str(cur_params.get("channel_mode") or "split")
     force_rgb = bool(cur_params["force_rgb"]) if cur_params.get("force_rgb") is not None else True
     channels = cur_params.get("channels")
@@ -1636,16 +1619,10 @@ def _build_steps(
                 },
             }
         )
+
+        
     else:
-        scale_detail = _intensity_scale_detail(scale_mode, scale_value)
-        steps.append(
-            {
-                "id": "intensity_scale",
-                "title": "Scale intensities",
-                "detail": scale_detail,
-                "technical": {"mode": scale_mode, "scale": scale_value},
-            }
-        )
+        
         pad_size = _canonical_spatial_size(cur_params.get("pad_size"))
         if pad_size is not None:
             steps.append(
@@ -1666,6 +1643,17 @@ def _build_steps(
                     "technical": {"resize_size": resize_size},
                 }
             )
+
+        scale_detail = _intensity_scale_detail(scale_mode, scale_value)
+        steps.append(
+            {
+                "id": "intensity_scale",
+                "title": "Scale intensities",
+                "detail": scale_detail,
+                "technical": {"mode": scale_mode, "scale": scale_value},
+            }
+        )
+        
         n_norm = _n_channels_for_transforms(dict(cur_params))
         steps.append(
             {
@@ -1675,6 +1663,25 @@ def _build_steps(
                 "technical": {"n_channels": n_norm},
             }
         )
+
+    if preprocessing_fn is not None:
+            name = callable_display_name(preprocessing_fn)
+            detail = f"`{name}` (internals unknown)"
+            if preprocessing_description:
+                detail = f"{detail}; {preprocessing_description}"
+            steps.append(
+                {
+                    "id": "custom_preprocess",
+                    "title": "Your preprocessing",
+                    "detail": detail,
+                    "technical": {
+                        "name": name,
+                        "description": preprocessing_description,
+                        "internals": "unknown",
+                    },
+                }
+            )
+    
 
     model_name = None
     model_class = "model"
