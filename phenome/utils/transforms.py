@@ -382,6 +382,9 @@ class TransformBuilder:
         resize_size: SpatialSize | None = None,
         pad_size: SpatialSize | None = None,
         n_channels: int = 3,
+        interpolation: transforms.InterpolationMode = (
+        transforms.InterpolationMode.BILINEAR
+        ),
     ) -> transforms.Compose:
         """Build torchvision transform pipeline for image preprocessing.
 
@@ -416,7 +419,7 @@ class TransformBuilder:
         if resize_hw is not None:
             parsed = _parse_spatial_size(resize_hw)
             assert parsed is not None
-            t.append(transforms.Resize(parsed, antialias=True))
+            t.append(transforms.Resize(parsed, interpolation=interpolation, antialias=True)) #modified to change the interpolation --> let the user choose the interpolation method
         t.append(transforms.Normalize(mean=mean, std=std))
         return transforms.Compose(t)
 
