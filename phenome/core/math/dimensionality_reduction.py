@@ -208,7 +208,18 @@ def _run_dimensionality_reduction_matrix_impl(
         component_names = [f"Component {i + 1}" for i in range(n_components)]
     elif method == "tsne":
         # Perplexity controls local vs global structure; must be < n_samples (sklearn constraint)
-        perplexity = kwargs.get("perplexity", 30.0)
+        
+        # New -------------------------------------
+        # Adapt perplexity to the number of available samples
+        n_samples = matrix.shape[0]    
+        requested_perplexity = kwargs.get("perplexity", 30.0)
+
+        perplexity = min(
+            float(requested_perplexity),
+            max(1.0, (n_samples - 1) / 3.0)
+        )
+        # -----------------------------------------
+
         _validate_tsne_sample_count(matrix.shape[0], float(perplexity))
         tsne_kwargs = {k: v for k, v in kwargs.items() if k != "perplexity"}
         if use_torchdr:

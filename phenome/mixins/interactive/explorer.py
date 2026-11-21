@@ -705,6 +705,57 @@ class PhenoMeInteractive:
         """Create embedding filter/exclude controls (same layout pattern as Highlight)."""
         _vh = INTERACTIVE_VALUES_H
         _sw = INTERACTIVE_SEARCH_W_PX
+
+        # --------------------------------------------------
+        # NEW - Timeframe selector
+        # --------------------------------------------------
+        metadata_df = pd.DataFrame(self.pheno.results.metadata)
+
+        self.time_values = sorted(
+            metadata_df["time_min"].dropna().unique().tolist()
+        )
+
+        self.time_mode = widgets.ToggleButtons(
+            options=[
+                ("All", "all"),
+                ("Single", "single"),
+                ("Range", "range"),
+            ],
+            value="all",
+            description="Time:",
+        )
+
+        self.time_single = widgets.Dropdown(
+            options=self.time_values,
+            value=self.time_values[0] if self.time_values else None,
+            description="Timepoint:",
+            layout=widgets.Layout(width="250px"),
+        )
+
+        self.time_range = widgets.SelectionRangeSlider(
+            options=self.time_values,
+            index=(0, len(self.time_values) - 1),
+            description="Range:",
+            continuous_update=False,
+            layout=widgets.Layout(width="500px"),
+        )
+
+        self.time_controls = widgets.VBox([
+            self.time_mode,
+            self.time_single,
+            self.time_range,
+        ])
+
+        def update_time_controls(change=None):
+            self.time_single.layout.display = (
+                "" if self.time_mode.value == "single" else "none"
+            )
+            self.time_range.layout.display = (
+                "" if self.time_mode.value == "range" else "none"
+            )
+
+        self.time_mode.observe(update_time_controls, names="value")
+        update_time_controls()
         _vw = INTERACTIVE_VALUES_W_PX
         _fmax = INTERACTIVE_FIELD_MAX_W_PX
         _fe_pair_layout = widgets.Layout(
@@ -857,7 +908,16 @@ class PhenoMeInteractive:
         )
 
         self._filter_accordion_panel = widgets.VBox(
+        # NEW -------------------------------------------------
             [
+                widgets.HTML(
+                    '<div style="font-size:10px;font-weight:600;color:#334155;'
+                    'margin-bottom:4px;">Timeframe</div>'
+                ),
+                self.time_controls,
+                widgets.HTML(
+                    '<hr style="border:0;border-top:1px solid #E2E8F0;">'
+                ),
                 self._filter_help,
                 self._filter_include_block,
                 widgets.HBox(
@@ -894,6 +954,27 @@ class PhenoMeInteractive:
             [("Exclude", self._exclude_accordion_panel)],
             open_index=None,
         )
+
+    # NEW ------------------------------------------------------
+    def _get_timeframe_mask(self, metadata_df):
+        """Return a Boolean mask for the selected timeframe."""
+
+        if self.time_mode.value == "all":
+            return np.ones(len(metadata_df), dtype=bool)
+
+        if self.time_mode.value == "single":
+            return (
+                metadata_df["time_min"].to_numpy()
+                == self.time_single.value
+            )
+
+        start, end = self.time_range.value
+
+        return (
+            (metadata_df["time_min"].to_numpy() >= start)
+            & (metadata_df["time_min"].to_numpy() <= end)
+        ) 
+    # -----------------------------------------------------------
 
     def _create_highlight_widgets(self) -> None:
         """Create highlight/filter widgets."""
@@ -2895,22 +2976,66 @@ class PhenoMeInteractive:
         # callback harmless before the old FigureWidget is replaced.
         self._sync_embed_filters_from_widgets()
         method_label = self.method_dropdown.value
+        # NEW ------------------------------------------------------
+        self._sync_embed_filters_from_widgets()
+
+        method_label = self.method_dropdown.value
+
+        # Start with the existing metadata filters
+        selected_filters = (
+            {
+                k: list(v) if isinstance(v, list) else v
+                for k, v in self.initial_filters.items()
+            }
+            if self.initial_filters
+            else {}
+        )
+
+        # Apply the dedicated timeframe selection
+        if self.time_mode.value == "single":
+            selected_times = [self.time_single.value]
+
+        elif self.time_mode.value == "range":
+            start, end = self.time_range.value
+            selected_times = [
+                t for t in self.time_values
+                if start <= t <= end
+            ]
+
+        else:
+            selected_times = None
+
+        # Combine timeframe with existing filters
+        if selected_times is not None:
+            if "time_min" in selected_filters:
+                existing_times = selected_filters["time_min"]
+                if not isinstance(existing_times, (list, tuple, set)):
+                    existing_times = [existing_times]
+
+                selected_times = [
+                    t for t in selected_times
+                    if t in existing_times
+                ]
+
+            selected_filters["time_min"] = selected_times
+
         compute_request: dict[str, Any] = {
             "method_label": method_label,
             "method_key": method_label.lower().replace("-", ""),
             "n_dims": self.dim_toggle.value,
             "source": self.source_dropdown.value,
-            "filters": (
-                {k: list(v) if isinstance(v, list) else v for k, v in self.initial_filters.items()}
-                if self.initial_filters
-                else None
-            ),
+            "filters": selected_filters if selected_filters else None,
             "exclude": (
-                {k: list(v) if isinstance(v, list) else v for k, v in self.initial_exclude.items()}
+                {
+                    k: list(v) if isinstance(v, list) else v
+                    for k, v in self.initial_exclude.items()
+                }
                 if self.initial_exclude
                 else None
             ),
         }
+        # ----------------------------------------------------------------
+
         self._compute_seq += 1
         self._selected_point_index = None
         self._multi_selected_indices = []
