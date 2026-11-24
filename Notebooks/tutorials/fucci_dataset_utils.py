@@ -8,6 +8,8 @@ Output layout:
     fucci_toy_datasets/<subset>/FUCCI_images/*.tiff
     fucci_toy_datasets/<subset>/metadata.csv
 
+The metadata CSV contains one row per exported frame, including the two
+time-aligned values from the matching labels file when available.
 TIFF frames are written without intensity normalization or dtype conversion.
 """
 from __future__ import annotations
@@ -214,13 +216,23 @@ def prepare_fucci_subset(
         num_frames = len(track_frames)
 
         label_path = labels_dir / npy_path.name
+        labels = None
         label_len = None
         if label_path.is_file():
             labels = np.load(label_path, allow_pickle=False)
-            if labels.ndim >= 2:
-                label_len = int(labels.shape[1])
+            if labels.ndim != 3 or labels.shape[0] != 2 or labels.shape[2] != 1:
+                raise ValueError(
+                    f"Expected labels with shape (2, N, 1) for {label_path}, "
+                    f"got {labels.shape}"
+                )
+            label_len = int(labels.shape[1])
 
         for t in range(0, num_frames, frame_stride):
+            if labels is not None and t >= label_len:
+                raise ValueError(
+                    f"Label track {label_path} has {label_len} timepoints, "
+                    f"but image frame {t} was requested"
+                )
             filename = f"{subset_key}_t{track_idx:04d}_f{t:04d}.tiff"
             save_frame_as_tiff(track_frames[t], out_img_dir / filename)
             records.append({
@@ -231,6 +243,8 @@ def prepare_fucci_subset(
                 "num_frames": num_frames,
                 "time_min": t * TIME_STEP_MINUTES,
                 "label_len": label_len,
+                "fucci_label_0": float(labels[0, t, 0]) if labels is not None else None,
+                "fucci_label_1": float(labels[1, t, 0]) if labels is not None else None,
                 "dataset_split": subset_key,
                 "condition": cfg["condition"],
             })
