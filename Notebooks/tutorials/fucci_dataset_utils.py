@@ -9,7 +9,7 @@ Output layout:
     fucci_toy_datasets/<subset>/metadata.csv
 
 The metadata CSV contains one row per exported frame, including the two
-time-aligned values from the matching labels file when available.
+time-aligned values and their mean from the matching labels file when available.
 TIFF frames are written without intensity normalization or dtype conversion.
 """
 from __future__ import annotations
@@ -233,20 +233,27 @@ def prepare_fucci_subset(
                     f"Label track {label_path} has {label_len} timepoints, "
                     f"but image frame {t} was requested"
                 )
-            filename = f"{subset_key}_t{track_idx:04d}_f{t:04d}.tiff"
-            save_frame_as_tiff(track_frames[t], out_img_dir / filename)
+            frame_name = f"{subset_key}_t{track_idx:04d}_f{t:04d}.tiff"
+            relative_filename = f"{npy_path.stem}/{frame_name}"
+
+            save_frame_as_tiff(track_frames[t], out_img_dir / relative_filename)
             records.append({
-                "filename": filename,
-                "source_file": npy_path.name,
-                "track_id": npy_path.stem,
-                "frame": t,
-                "num_frames": num_frames,
-                "time_min": t * TIME_STEP_MINUTES,
-                "label_len": label_len,
-                "fucci_label_0": float(labels[0, t, 0]) if labels is not None else None,
-                "fucci_label_1": float(labels[1, t, 0]) if labels is not None else None,
-                "dataset_split": subset_key,
-                "condition": cfg["condition"],
+                        "filename": relative_filename,
+                        "source_file": npy_path.name,
+                        "track_id": npy_path.stem,
+                        "frame": t,
+                        "num_frames": num_frames,
+                        "time_min": t * TIME_STEP_MINUTES,
+                        "label_len": label_len,
+                        "fucci_label_0": float(labels[0, t, 0]) if labels is not None else None,
+                        "fucci_label_1": float(labels[1, t, 0]) if labels is not None else None,
+                        "fucci_label_mean": (
+                                            (float(labels[0, t, 0]) + float(labels[1, t, 0])) / 2
+                                            if labels is not None
+                                            else None
+                                        ),
+                        "dataset_split": subset_key,
+                        "condition": cfg["condition"],
             })
 
     out_subset_dir.mkdir(parents=True, exist_ok=True)

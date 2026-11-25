@@ -31,6 +31,7 @@ def test_prepare_fucci_subset_adds_time_aligned_labels(tmp_path: Path) -> None:
     assert metadata["frame"].tolist() == [0, 2]
     assert metadata["fucci_label_0"].tolist() == [10.0, 12.0]
     assert metadata["fucci_label_1"].tolist() == [20.0, 22.0]
+    assert metadata["fucci_label_mean"].tolist() == [15.0, 17.0]
 
 
 def test_prepare_fucci_subset_rejects_short_label_track(tmp_path: Path) -> None:
