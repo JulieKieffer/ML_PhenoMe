@@ -6,25 +6,27 @@ Raw input layout:
 
 Output layout:
     fucci_toy_datasets/<subset>/FUCCI_images/*.tiff
+    fucci_toy_datasets/<subset>/FUCCI_masks/*.tiff
     fucci_toy_datasets/<subset>/metadata.csv
 
 The metadata CSV contains one row per exported frame, including the two
 time-aligned values and their mean from the matching labels file when available.
-TIFF frames are written without intensity normalization or dtype conversion.
+Exported images are cropped around the center-nearest segmented nucleus, with
+surrounding pixels preserved; binary masks are saved alongside them.
 """
+
 from __future__ import annotations
 
 import shutil
-from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tifffile
-import matplotlib.pyplot as plt
-
-
+from scipy import ndimage as ndi
+from skimage import feature, filters, measure, morphology, segmentation
 
 TIME_STEP_MINUTES = 5
 IMAGE_EXTENSIONS = {".tif", ".tiff"}
@@ -40,6 +42,21 @@ FUCCI_SUBSET_CONFIGS = {
         "condition": "drug_treated",
     },
 }
+
+_FUCCI_METADATA_COLUMNS = [
+    "filename",
+    "source_file",
+    "track_id",
+    "frame",
+    "num_frames",
+    "time_min",
+    "label_len",
+    "fucci_label_0",
+    "fucci_label_1",
+    "fucci_label_mean",
+    "dataset_split",
+    "condition",
+]
 
 
 def resolve_fucci_roots(start: Path | None = None) -> tuple[Path, Path]:
@@ -60,14 +77,15 @@ def _npy_files(folder: Path) -> list[Path]:
     if not folder.is_dir():
         return []
     return sorted(
-        p for p in folder.iterdir()
-        if p.is_file() and p.suffix.lower() == ".npy"
-        and not p.name.startswith("._")
+        p
+        for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() == ".npy" and not p.name.startswith("._")
     )
 
 
-def inspect_fucci_datasets(raw_root: Path | str | None = None,
-                           subsets: Iterable[str] | None = None) -> dict:
+def inspect_fucci_datasets(
+    raw_root: Path | str | None = None, subsets: Iterable[str] | None = None
+) -> dict:
     """Print and return image/label counts and sample array shapes."""
     if raw_root is None:
         raw_root, _ = resolve_fucci_roots()
@@ -126,10 +144,106 @@ def _extract_track_frames(raw_arr: np.ndarray) -> list[np.ndarray]:
     return [arr]
 
 
+def _segment_center_nucleus(frame: np.ndarray, min_area: int = 500) -> np.ndarray:
+    """Segment the labeled nucleus nearest the frame center.
+
+    FUCCI frames use channel-first ``(C, H, W)`` layout. Channel 1 is used
+    when present; otherwise the first channel (or the 2D frame) is used.
+    """
+    frame = np.asarray(frame)
+    if frame.ndim == 2:
+        image = frame
+    elif frame.ndim == 3:
+        channel = 1 if frame.shape[0] > 1 else 0
+        image = frame[channel]
+    else:
+        raise ValueError(f"Expected a 2D frame or channel-first 3D frame, got {frame.shape}")
+
+    smooth = filters.gaussian(image.astype(float), sigma=2, preserve_range=True)
+    binary = smooth > filters.threshold_otsu(smooth)
+    binary = morphology.opening(binary, morphology.disk(3))
+    binary = ndi.binary_fill_holes(binary)
+    if not np.any(binary):
+        return np.zeros(image.shape, dtype=bool)
+
+    distance = ndi.distance_transform_edt(binary)
+    components = measure.label(binary)
+    peaks = feature.peak_local_max(
+        distance,
+        min_distance=20,
+        labels=components,
+        exclude_border=False,
+    )
+    if len(peaks):
+        markers = np.zeros(image.shape, dtype=int)
+        for marker_id, (row, col) in enumerate(peaks, start=1):
+            markers[row, col] = marker_id
+        labeled = segmentation.watershed(-distance, markers, mask=binary)
+    else:
+        labeled = components
+
+    regions = [region for region in measure.regionprops(labeled) if region.area > min_area]
+    if not regions:
+        regions = measure.regionprops(labeled)
+    if not regions:
+        return np.zeros(image.shape, dtype=bool)
+
+    center_y, center_x = (np.array(image.shape) - 1) / 2
+    target = min(
+        regions,
+        key=lambda region: np.hypot(
+            region.centroid[0] - center_y,
+            region.centroid[1] - center_x,
+        ),
+    )
+    return labeled == target.label
+
+
+def _crop_frame_to_mask(
+    frame: np.ndarray, mask: np.ndarray, margin_fraction: float = 0.1
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Crop a frame and mask around the foreground, preserving surrounding pixels.
+
+    The margin is applied on each side as a fraction of the foreground bounding
+    box and is clipped to the image boundaries.
+    """
+    frame = np.asarray(frame)
+    mask = np.asarray(mask, dtype=bool)
+    if not np.isfinite(margin_fraction) or margin_fraction < 0:
+        raise ValueError("margin_fraction must be a finite, non-negative number")
+    spatial_shape = frame.shape if frame.ndim == 2 else frame.shape[-2:]
+    if spatial_shape != mask.shape:
+        raise ValueError(
+            f"Frame spatial shape {spatial_shape} does not match mask shape {mask.shape}"
+        )
+
+    rows, cols = np.where(mask)
+    if not len(rows):
+        return None
+
+    mask_y0, mask_y1 = rows.min(), rows.max() + 1
+    mask_x0, mask_x1 = cols.min(), cols.max() + 1
+    margin_y = int(np.ceil((mask_y1 - mask_y0) * margin_fraction))
+    margin_x = int(np.ceil((mask_x1 - mask_x0) * margin_fraction))
+    height, width = mask.shape
+    y0 = max(0, mask_y0 - margin_y)
+    y1 = min(height, mask_y1 + margin_y)
+    x0 = max(0, mask_x0 - margin_x)
+    x1 = min(width, mask_x1 + margin_x)
+    crop_mask = mask[y0:y1, x0:x1]
+    if frame.ndim == 2:
+        crop = frame[y0:y1, x0:x1].copy()
+    elif frame.ndim == 3:
+        crop = frame[:, y0:y1, x0:x1].copy()
+    else:
+        raise ValueError(f"Expected a 2D frame or channel-first 3D frame, got {frame.shape}")
+    return crop, crop_mask
+
+
 def _clear_generated_images(folder: Path) -> None:
-    """Remove old image outputs to prevent PNG/TIFF duplicates with same stem."""
+    """Remove generated images recursively to prevent stale nested outputs."""
     if folder.exists():
-        for path in folder.iterdir():
+        for path in folder.rglob("*"):
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS | {".png"}:
                 path.unlink()
     folder.mkdir(parents=True, exist_ok=True)
@@ -143,10 +257,12 @@ def prepare_fucci_subset(
     frame_stride: int = 1,
     clean_output: bool = True,
 ) -> tuple[Path, Path]:
-    """Export a FUCCI subset (or 'combined') to TIFFs and metadata.csv.
+    """Export segmented FUCCI crops, matching masks, and metadata as TIFF/CSV.
 
     Set max_tracks=None to export every track. frame_stride=1 exports every
-    frame; frame_stride=2 exports every second frame.
+    frame; frame_stride=2 exports every second frame. Each frame is segmented
+    on channel 1 when present, then cropped around the center-nearest nucleus
+    with a 10% margin on each side. Frames with no detected nucleus are skipped.
     """
     if frame_stride < 1:
         raise ValueError("frame_stride must be at least 1")
@@ -160,30 +276,41 @@ def prepare_fucci_subset(
     if subset_key == "combined":
         combined_dir = out_root / "combined"
         combined_img_dir = combined_dir / "FUCCI_images"
+        combined_mask_dir = combined_dir / "FUCCI_masks"
         if clean_output:
             _clear_generated_images(combined_img_dir)
+            _clear_generated_images(combined_mask_dir)
         else:
             combined_img_dir.mkdir(parents=True, exist_ok=True)
+            combined_mask_dir.mkdir(parents=True, exist_ok=True)
 
         frames = []
         for sub_key in FUCCI_SUBSET_CONFIGS:
             sub_img_dir, sub_meta_path = prepare_fucci_subset(
                 sub_key, raw_root, out_root, max_tracks, frame_stride, clean_output
             )
+            sub_mask_dir = out_root / sub_key / "FUCCI_masks"
             sub_df = pd.read_csv(sub_meta_path)
             for row in sub_df.to_dict("records"):
                 src = sub_img_dir / row["filename"]
+                src_mask = sub_mask_dir / row["filename"]
                 dst_name = f"{sub_key}_{row['filename']}"
                 dst = combined_img_dir / dst_name
+                dst_mask = combined_mask_dir / dst_name
                 if not src.is_file():
                     raise FileNotFoundError(f"Expected exported TIFF not found: {src}")
+                if not src_mask.is_file():
+                    raise FileNotFoundError(f"Expected exported mask not found: {src_mask}")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst_mask.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+                shutil.copy2(src_mask, dst_mask)
                 row["filename"] = dst_name
                 row["dataset_split"] = sub_key
                 frames.append(row)
 
         combined_meta = combined_dir / "metadata.csv"
-        pd.DataFrame(frames).to_csv(combined_meta, index=False)
+        pd.DataFrame(frames, columns=_FUCCI_METADATA_COLUMNS).to_csv(combined_meta, index=False)
         print(f"✓ combined: {len(frames)} frames -> {combined_img_dir}")
         return combined_img_dir, combined_meta
 
@@ -200,16 +327,20 @@ def prepare_fucci_subset(
 
     out_subset_dir = out_root / subset_key
     out_img_dir = out_subset_dir / "FUCCI_images"
+    out_mask_dir = out_subset_dir / "FUCCI_masks"
     if clean_output:
         _clear_generated_images(out_img_dir)
+        _clear_generated_images(out_mask_dir)
     else:
         out_img_dir.mkdir(parents=True, exist_ok=True)
+        out_mask_dir.mkdir(parents=True, exist_ok=True)
 
     npy_files = _npy_files(images_dir)
     if max_tracks is not None:
         npy_files = npy_files[:max_tracks]
 
     records = []
+    skipped_frames = 0
     for track_idx, npy_path in enumerate(npy_files):
         track = np.load(npy_path, allow_pickle=False)
         track_frames = _extract_track_frames(track)
@@ -222,8 +353,7 @@ def prepare_fucci_subset(
             labels = np.load(label_path, allow_pickle=False)
             if labels.ndim != 3 or labels.shape[0] != 2 or labels.shape[2] != 1:
                 raise ValueError(
-                    f"Expected labels with shape (2, N, 1) for {label_path}, "
-                    f"got {labels.shape}"
+                    f"Expected labels with shape (2, N, 1) for {label_path}, got {labels.shape}"
                 )
             label_len = int(labels.shape[1])
 
@@ -235,31 +365,48 @@ def prepare_fucci_subset(
                 )
             frame_name = f"{subset_key}_t{track_idx:04d}_f{t:04d}.tiff"
             relative_filename = f"{npy_path.stem}/{frame_name}"
+            frame = track_frames[t]
+            mask = _segment_center_nucleus(frame)
+            cropped = _crop_frame_to_mask(frame, mask)
+            if cropped is None:
+                skipped_frames += 1
+                continue
+            roi_frame, roi_mask = cropped
 
-            save_frame_as_tiff(track_frames[t], out_img_dir / relative_filename)
-            records.append({
-                        "filename": relative_filename,
-                        "source_file": npy_path.name,
-                        "track_id": npy_path.stem,
-                        "frame": t,
-                        "num_frames": num_frames,
-                        "time_min": t * TIME_STEP_MINUTES,
-                        "label_len": label_len,
-                        "fucci_label_0": float(labels[0, t, 0]) if labels is not None else None,
-                        "fucci_label_1": float(labels[1, t, 0]) if labels is not None else None,
-                        "fucci_label_mean": (
-                                            (float(labels[0, t, 0]) + float(labels[1, t, 0])) / 2
-                                            if labels is not None
-                                            else None
-                                        ),
-                        "dataset_split": subset_key,
-                        "condition": cfg["condition"],
-            })
+            save_frame_as_tiff(roi_frame, out_img_dir / relative_filename)
+            save_frame_as_tiff(
+                roi_mask.astype(np.uint8),
+                out_mask_dir / relative_filename,
+            )
+            records.append(
+                {
+                    "filename": relative_filename,
+                    "source_file": npy_path.name,
+                    "track_id": npy_path.stem,
+                    "frame": t,
+                    "num_frames": num_frames,
+                    "time_min": t * TIME_STEP_MINUTES,
+                    "label_len": label_len,
+                    "fucci_label_0": float(labels[0, t, 0]) if labels is not None else None,
+                    "fucci_label_1": float(labels[1, t, 0]) if labels is not None else None,
+                    "fucci_label_mean": (
+                        (float(labels[0, t, 0]) + float(labels[1, t, 0])) / 2
+                        if labels is not None
+                        else None
+                    ),
+                    "dataset_split": subset_key,
+                    "condition": cfg["condition"],
+                }
+            )
 
     out_subset_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = out_subset_dir / "metadata.csv"
-    pd.DataFrame(records).to_csv(metadata_path, index=False)
-    print(f"✓ {subset_key}: exported {len(records)} frames from {len(npy_files)} tracks -> {out_img_dir}")
+    pd.DataFrame(records, columns=_FUCCI_METADATA_COLUMNS).to_csv(metadata_path, index=False)
+    if skipped_frames:
+        print(f"Skipped {skipped_frames} frames with no detected nucleus.")
+    print(
+        f"✓ {subset_key}: exported {len(records)} frames from {len(npy_files)} tracks -> {out_img_dir}"
+    )
     return out_img_dir, metadata_path
 
 
@@ -305,23 +452,18 @@ def display_tiff_conversion_example(
     elif frame.ndim == 3:
         if not 0 <= channel < frame.shape[0]:
             raise ValueError(
-                f"Channel {channel} is out of range. "
-                f"Available channels: 0 to {frame.shape[0] - 1}"
+                f"Channel {channel} is out of range. Available channels: 0 to {frame.shape[0] - 1}"
             )
 
         original_view = frame[channel]
         converted_view = reloaded[channel]
 
     else:
-        raise ValueError(
-            f"Expected a 2D or 3D frame, got shape {frame.shape}"
-        )
+        raise ValueError(f"Expected a 2D or 3D frame, got shape {frame.shape}")
 
     # Use shared contrast limits for a fair visual comparison.
     # This affects only how the images are displayed, not their data.
-    vmin, vmax = np.nanpercentile(
-        original_view, percentiles
-    )
+    vmin, vmax = np.nanpercentile(original_view, percentiles)
 
     if vmin == vmax:
         vmin = np.nanmin(original_view)
@@ -368,4 +510,3 @@ def display_tiff_conversion_example(
     print(f"Saved to: {output_path}")
 
     return fig, reloaded
-
